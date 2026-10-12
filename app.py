@@ -1,130 +1,87 @@
-from flask import Flask, request, jsonify, render_template
-import numpy as np
+"""
+FarmIQ — Flask API serving crop-condition predictions from NASA MERRA-2 data.
+
+GET  /           Map UI (Leaflet)
+POST /predict    {"latitude": 53.35, "longitude": -6.26} -> five farm indicators
+GET  /healthz    Liveness/readiness probe
+"""
+
+import os
+from pathlib import Path
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 import joblib
+import numpy as np
 import pandas as pd
 import tensorflow as tf
-import zipfile
-import os
-
-
-
+from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 
+from farmiq_core import FEATURES, MAX_DISTANCE_DEG, interpret, nearest_cell
+
+BASE_DIR = Path(__file__).resolve().parent
+GRID_PATH = BASE_DIR / "data" / "grid_latest.csv"
+
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)  # allow the map UI to be hosted separately from the API
+
+# ── Load model, scaler and data once at startup ──
+model = tf.keras.models.load_model(BASE_DIR / "cnn_final.h5", compile=False)
+scaler = joblib.load(BASE_DIR / "scaler.pkl")
+
+if not GRID_PATH.exists():
+    from prepare_data import main as prepare
+    prepare(BASE_DIR / "combined_europe_data_Test1.csv.zip", GRID_PATH)
+grid = pd.read_csv(GRID_PATH)
 
 
-def extract_and_read_zip(zip_path):
-    # Get the directory of the zip file
-    extract_to = os.path.dirname(zip_path)
+def predict_conditions(lat: float, lon: float) -> dict:
+    cell, distance = nearest_cell(grid, lat, lon)
 
-    # Open the .zip file
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        # Extract all the contents into the same directory as the zip file
-        zip_ref.extractall(extract_to)
+    # Same preprocessing as training: StandardScaler, then shape (batch, steps=1, features=10).
+    x = pd.DataFrame([cell[FEATURES].astype(float).to_numpy()], columns=FEATURES)
+    x_scaled = scaler.transform(x).reshape(1, 1, len(FEATURES))
+    pred = model.predict(x_scaled, verbose=0)[0]
 
-        # Assuming there's only one CSV in the zip or we know the file name
-        csv_file = [f for f in zip_ref.namelist() if f.endswith('.csv')][0]
-
-        # Construct full path to the CSV file in the same folder as the zip
-        csv_path = os.path.join(extract_to, csv_file)
-
-        # Read the CSV into a pandas DataFrame
-        data = pd.read_csv(csv_path)
-        return data
-
-# Load your model (make sure to place your model file in the same directory)
-model = tf.keras.models.load_model('cnn_final.h5')  # Update with your model file name
-zip_file_path = 'combined_europe_data_Test1.csv.zip'
-
-# Extract and read data from the same path as the .zip file
-data = extract_and_read_zip(zip_file_path)
-scaler = joblib.load('scaler.pkl')
-app = Flask(__name__)
-
-
-def filter_data_by_lat_lon(df, input_lat, input_lon):
-    # Calculate the distance between input lat, lon and dataset lat, lon
-    distances = np.sqrt((df['lat'] - input_lat) * 2 + (df['lon'] - input_lon) * 2)
-
-    # Find the index of the closest point
-    closest_index = distances.idxmin()
-
-    # Return the closest row of data
-    return df.iloc[closest_index]
-
-
-def predict_conditions(input_lat, input_lon):
-    relevant_columns = [
-        'EVLAND', 'PRECTOTLAND', 'GWETPROF', 'GWETROOT',
-        'GWETTOP', 'LAI', 'TSOIL1', 'TSURF', 'lat', 'lon'
-    ]
-    # Get the nearest data point based on lat and lon
-    nearest_data = filter_data_by_lat_lon(data, input_lat, input_lon)
-
-    # Extract features for prediction
-    X_input = nearest_data[relevant_columns].values.reshape(1, -1)
-
-    # Normalize or standardize the input as done during training
-    X_input_scaled = scaler.transform(X_input)
-
-    # Reshape the input for the CNN (or any model you use)
-    X_input_reshaped = X_input_scaled.reshape(1, 1, X_input_scaled.shape[1])  # For CNN
-
-    # Make predictions using the model
-    predictions = model.predict(X_input_reshaped)
-
-    # Interpret the predictions (convert numeric outputs into verbal or percentage)
-    water_availability = predictions[0][0]
-    soil_condition = predictions[0][1]
-    crop_health = predictions[0][2]
-    frost_risk = predictions[0][3]
-    yield_quality = predictions[0][4]
-
-    # Convert numeric predictions into simple conditions
-    # 1. Water Status based on Water Availability Index (WAI)
-    water_status = "Good" if water_availability > 2.16 else "Average" if water_availability > 0.90 else "Poor"
-
-    # 2. Soil Status based on Soil Moisture Index (SMI)
-    soil_status = "Optimal" if soil_condition > 0.5 else "Dry"
-
-    # 3. Crop Health Status based on Crop Health Index (CHI)
-    crop_health_status = "Healthy" if crop_health == 1 else ("At Risk" if crop_health == -1 else "Average")
-
-    # 4. Frost Risk Status based on Frost Risk Indicator (FRI)
-    frost_risk_status = f"{'High' if frost_risk == 1 else 'Low'}"
-
-    # 5. Yield Quality Status based on Yield Quality Index (YQI)
-    yield_quality_status = f"{yield_quality * 100:.2f}%"
-
-    # Return the predictions (can also plot a graph if required)
     return {
-        "Water Availability": water_status,
-        "Soil Condition": soil_status,
-        "Crop Health": crop_health_status,
-        "Frost Risk": frost_risk_status,
-        "Yield Quality": yield_quality_status
+        "prediction": interpret(pred),
+        "location": {
+            "grid_lat": float(cell["lat"]),
+            "grid_lon": float(cell["lon"]),
+            "distance_deg": round(distance, 3),
+            "period": f"{cell['period_start']} to {cell['period_end']} (UTC, 24 h mean)",
+        },
     }
 
 
-@app.route('/')
+@app.route("/")
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
 
 
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
-    # Get latitude and longitude from the request
-    data = request.get_json(force=True)
-    lat = data['latitude']
-    lon = data['longitude']
-    print(lat, lon)
+    data = request.get_json(silent=True) or {}
+    try:
+        lat = float(data["latitude"])
+        lon = float(data["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Send JSON with numeric 'latitude' and 'longitude'."}), 400
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({"error": "Latitude/longitude out of range."}), 400
 
-    prediction = predict_conditions(lat, lon)
+    result = predict_conditions(lat, lon)
+    if result["location"]["distance_deg"] > MAX_DISTANCE_DEG:
+        return jsonify({"error": "Location is outside the dataset's coverage (Europe, 36-71°N, 10°W-60°E).",
+                        "location": result["location"]}), 422
+    return jsonify(result)
 
-    return jsonify({'prediction': prediction})
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok", "grid_cells": int(len(grid))})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
-
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

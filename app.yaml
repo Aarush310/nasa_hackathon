@@ -1,2 +1,4 @@
-runtime: python39  # or python38
-entrypoint: gunicorn -b :$PORT main:app  # Change 'main' to the name of your main application file
+# Google App Engine (standard) config
+runtime: python312
+entrypoint: gunicorn -b :$PORT --workers 1 --threads 4 --timeout 120 app:app
+instance_class: F4_1G   # TensorFlow + model need ~1 GB of memory

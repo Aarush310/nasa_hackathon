@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+# extracted copy of the dataset (the zip is the source of truth)
+combined_europe_data_Test1.csv
+__MACOSX/

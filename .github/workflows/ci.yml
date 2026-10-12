@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests (data prep, nearest-cell lookup, output interpretation)
+        run: pytest -v
+
+  container:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t farmiq:ci .
+      - name: Start container as a random non-root UID (like OpenShift)
+        run: docker run -d --name farmiq -p 8080:8080 --user 1000870000:0 farmiq:ci
+      - name: Health check and real predictions
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/healthz; then echo; break; fi
+            sleep 2
+          done
+          dublin=$(curl -fsS -X POST http://localhost:8080/predict -H 'Content-Type: application/json' \
+                    -d '{"latitude": 53.35, "longitude": -6.26}')
+          madrid=$(curl -fsS -X POST http://localhost:8080/predict -H 'Content-Type: application/json' \
+                    -d '{"latitude": 40.4, "longitude": -3.7}')
+          echo "Dublin: $dublin"; echo "Madrid: $madrid"
+          echo "$dublin" | grep -q '"grid_lat":53.5'
+          echo "$madrid" | grep -q '"grid_lat":40.5'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/predict \
+                  -H 'Content-Type: application/json' -d '{"latitude": -33.9, "longitude": 151.2}')
+          test "$code" = "422"
+      - name: Container logs
+        if: always()
+        run: docker logs farmiq || true

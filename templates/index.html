@@ -231,7 +231,7 @@
         }).addTo(map);
 
         async function fetchFarmConditions(lat, lng) {
-            const apiUrl = `/predict`;  // Update with your Cloud Run service URL
+            const apiUrl = `/predict`;
             
             const data = {
                 latitude: lat,
@@ -260,6 +260,16 @@
         }
 
         function updateSidebar(data) {
+            // No prediction (e.g. clicked outside the dataset's European coverage): clear the panel.
+            if (!data || !data.prediction) {
+                ["waterAvailability", "soilCondition", "cropHealth", "frostRisk", "yieldQuality"].forEach(id => {
+                    document.getElementById(id).textContent = "No data here";
+                });
+                ["waterBar", "soilBar", "cropBar", "frostBar", "yieldBar"].forEach(id => {
+                    document.getElementById(id).style.width = "0%";
+                });
+                return;
+            }
             const prediction = data.prediction;
             document.getElementById("waterAvailability").textContent = prediction['Water Availability'];
             let waterBarInfo = getBarWidth(prediction['Water Availability']); 

@@ -1,0 +1,4 @@
+# Lightweight deps for the unit tests (no TensorFlow needed)
+numpy>=1.26
+pandas>=2.0
+pytest>=7.0
