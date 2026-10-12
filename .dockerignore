@@ -1,0 +1,11 @@
+.git
+.github
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+*.pptx
+venv/
+.venv/
+__MACOSX/
+combined_europe_data_Test1.csv
